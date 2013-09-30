@@ -1,0 +1,3 @@
+(define (compile hi1)
+    (begin
+        (pass1 hi1)))

@@ -1,0 +1,219 @@
+        Chisa
+
+Chisa is an experiment in language design and implementation.
+
+
+
+        Installing
+
+Use the standard 'make' command:
+
+$ make
+
+Two commands are built: fic and bootstrap1. Fic translates FI programs to C.
+The purpose of bootstrap1 is to compile a subset of HI programs to C. It is not
+yet in a working state.
+
+
+
+        HI and FI
+
+HI and FI are two invented languages. I will introduce them separately,
+starting with HI.
+
+HI is a higher-order, sequential, unityped language. Its only control flow
+operators are function-application and pattern-matching. Here's a taste:
+
+        # Line-comments start with a hash character.
+
+        # You can define global variables.
+
+        (define x 1)
+
+        # The only classes of literal value are number and string.
+
+        (define s "foo")
+
+        # You can define 'constructors'.
+
+        (define (Cons x xs))
+        (define (Nil))
+
+        # Constructors can be used to create tagged tuples and for pattern
+        # matching. Here, we define the function append using constructors for
+        # introducing values and for pattern-matching them. Constructor names
+        # begin with an uppercase letter. All other variables begin with a
+        # lowercase letter.
+
+        (define (append xs ys)
+            (match xs
+                (case (Cons u us)
+                    (Cons u (append us ys)))
+                (case (Nil)
+                    ys)))
+
+        # Local bindings can be introduced in a few different ways:
+
+        # 1. Using a pattern-match form as above, which bound variables u and
+        # us.
+
+        # 2. Using a define form within a begin form:
+
+        (begin
+            (define x (g 22))
+            (h x x))
+
+        # 3. Using a define form within a block form:
+
+        (block
+            (h x x)
+            (define x (g 22)))
+
+        # Block forms have the following syntax:
+
+        (block
+            <expr>
+            <define>*)
+
+        # The <define> forms introduce mutually recursive bindings for use
+        # within the <expr>.
+
+        # Begin forms have the following syntax:
+
+        (begin
+            <stmt>*
+            <expr>)
+
+        <stmt> = <define> | <expr>
+
+        # A begin form is evaluated sequentially. Variables bound in one
+        # statement are in scope for all forms that follow within the begin
+        # form.
+
+        # The full grammar for <define> forms is as follows:
+
+        <define>    =   (define <var>
+                            <expr>
+                            <define>*)
+                    |   (define (<functionName> <var>*)
+                            <expr>
+                            <define>*)
+                    |   (define (<constructorName> <var>*))
+                    |   (define (<constructorName> <var>*)
+                            <expr>
+                            <define>*)
+
+        # All of the nested <define> forms in the above rules bind mutually
+        # recursive variables. The last rule in the list does not bind
+        # <constructorName> but rather uses it to match against the value of
+        # <expr> and bind the variables appearing as constructor arguments.
+
+        # For example, when working with the abstract syntax tree of HI
+        # programs, the last rule above may be used like so:
+
+        (begin
+            (define (HiBlock expr defines) form)
+            (define (HiBegin forms) expr)
+            (pass1Begin forms))
+
+        # In the above example, we know that form is a HiBlock tuple so we
+        # pattern-match to obtain its component values. We also know that expr
+        # must be a HiBegin tuple so we further match to obtain the forms of
+        # the HiBegin value so we can pass them to the pass1Begin function.
+
+        # Anonymous functions are written like so:
+
+        (func (<var>*)
+            <expr>
+            <define>*)
+
+FI is a first-order, sequential, unityped language. It resembles SSA form but
+PHI statements have been replaced by another mechanism. It is inspired by the
+SSA intermediate language of the MLton compiler. Here's a taste:
+
+        # Line comments are available as in HI.
+
+        # Variable and constructor definitions are also as in HI. Functions are
+        # composed of basic blocks (control flow jumps occur at block
+        # boundaries only).
+
+        (define (append xs ys)
+            (define (L1)
+                (match xs
+                    (case Cons L2)
+                    (case Nil L3)))
+            (define (L2 u us)
+                (L4 (append us ys)))
+            (define (L3)
+                (set x1 (Nil))
+                (return x1))
+            (define (L4 x2)
+                (set x3 (cons u x2))
+                (return x3)))
+
+        # Above, the append function has four basic blocks labeled L1, L2, L3,
+        # and L4. Basic blocks may receive arguments. It is this feature that
+        # allows FI to do without PHI statements. See 'SSA is Functional
+        # Programming' by Andrew Appel for more on that topic. FI does not have
+        # nested scoping. In that way, it is more like SSA. Each basic block
+        # ends with a control transfer: either a call as in block L2 above
+        # (which specifies L4 as continuation), a return, a pattern match, or a
+        # goto-with-arguments.
+
+
+
+        Goals
+
+HI is designed to provide a convenient and uniform syntax for functional
+programming. Its binding forms are intended to make code layout less irregular
+than is typical in the presence of local function definitions,
+pattern-matching, and mutual recursion. FI is designed to be similar in style
+to HI and to be a good language in which to optimize programs, just as SSA is
+good for program analysis and optimization. The languages are designed with
+native-code compilation in mind.
+
+
+
+        Guide to the Code
+
+There is a parser for each language. See hi-parser.y and fi-parser.y. The
+conversion of FI programs to C is managed by printer.c. As suggested by the
+name, this conversion is extremely straightforward (as C is close to SSA). The
+conversion of HI programs to C turned out to be too much work for the time I
+had. The first pass is written in HI and can be found in compiler.hi. For
+bootstrapping, I tried to manually compile the first pass to FI, hence
+bootpass1.fi. Manual compilation is error prone, to say the least; especially
+with extremely immature support tools. In any case, bootpass1.fi can be
+successfully translated to C and compiled into an executable by the C compiler.
+Unfortunately, the first bootstrapping pass never reached a working state. The
+idea is that bootstrap1 should be able to compile bootpass1.hi, bootstrap2
+should be able to compile bootpass2.hi, and so on until bootstrapN, which can
+process the complete HI language. There is an extremely minimal runtime in
+runtime.c.
+
+
+
+        Compilation Roadmap
+
+The three most notable steps from HI to FI are:
+
+    1. The transformation from higher-order to first order.
+    2. The flattening of nested expressions.
+    3. The naming of continuations.
+
+The first pass (bootpass1) is meant to carry out the third of those steps.
+
+Once FI programs are available, some optimizations become available:
+
+    1. Inlining.
+    2. Contification.
+    3. Constant propagation.
+    4. Dead code elimination.
+    5. Etc, etc.
+
+
+
+        Future
+
+The Chisa project is over now but the ideas remain interesting. I expect to
+return to them again later.

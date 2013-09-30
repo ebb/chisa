@@ -1,0 +1,217 @@
+(define (Pair a b))
+
+(define (Triple a b c))
+
+(define (single x)
+    (begin (cons x nil)))
+
+(define (append xs ys)
+    (begin
+        (match xs
+            (case (Cons u us)
+                (begin
+                    (define x1 (append us ys))
+                    (cons u x1)))
+            (else (begin ys)))))
+
+(define (P1TailCont))
+
+(define (P1BlockCont label))
+
+(define (P1TrivialCont x forms formsCont))
+
+(define (pass1 hi1)
+    (begin
+        (match hi1
+            (case (Cons def defs)
+                (begin
+                    (define x1 (pass1Toplevel def))
+                    (define x2 (pass1 defs))
+                    (cons x1 x2)))
+            (else (begin nil)))))
+
+(define (pass1Toplevel def)
+    (begin
+        (match def
+            (case (HiDefineVar x constant)
+                (begin (FiDefineVar x constant)))
+            (case (HiDefineCons c consArgs)
+                (begin (FiDefineCons c consArgs)))
+            (case (HiDefineFunc f funcArgs blk)
+                (begin
+                    (define (HiBlock expr defines) blk)
+                    (define (HiBegin forms) expr)
+                    (define x1 (P1TailCont))
+                    (define (Triple stmts xfer blks)
+                        (pass1Begin forms x1))
+                    (define x2 (genLabel))
+                    (define x3 (FiBlock x2 nil stmts xfer))
+                    (define x4 (cons x3 blks))
+                    (FiDefineFunc f funcArgs x4))))))
+
+(define (pass1Begin forms cont)
+    (begin
+        (define (Cons form moreForms) forms)
+        (match form
+            (case (HiDefineByMatch c args blk)
+                (begin
+                    (define (HiBlock expr defines) blk)
+                    (define x1 (HiBegin moreForms))
+                    (define x2 (HiBlock x1 nil))
+                    (define x3 (HiCase c args x2))
+                    (define x4 (cons x3 nil))
+                    (define x5 (HiMatch expr x4))
+                    (pass1SimpleExpr x5 cont)))
+            (case (HiDefineVar x varBlk)
+                (begin
+                    (define (HiBlock expr defines) varBlk)
+                    (define x6 (P1TrivialCont x moreForms cont))
+                    (pass1SimpleExpr expr x6)))
+            (else
+                (begin (pass1SimpleExpr form cont))))))
+
+(define (pass1SimpleExpr expr cont)
+    (begin
+        (match expr
+            (case (Fixnum)
+                (begin (pass1TrivialExpr expr cont)))
+            (case (String)
+                (begin (pass1TrivialExpr expr cont)))
+            (case (Id name)
+                (begin (pass1TrivialExpr expr cont)))
+            (case (HiConsApp c consArgs)
+                (begin (pass1TrivialExpr expr cont)))
+            (case (HiPrimApp p primArgs)
+                (begin (pass1TrivialExpr expr cont)))
+            (case (HiCall f args)
+                (begin
+                    (define (Pair explicitCont contBlocks)
+                        (pass1ExplicitCont cont))
+                    (match explicitCont
+                        (case (P1TailCont)
+                            (begin
+                                (define x1 (FiCall nil f args))
+                                (Triple nil x1 nil)))
+                        (case (P1BlockCont label)
+                            (begin
+                                (define x2 (FiCall label f args))
+                                (Triple nil x2 contBlocks))))))
+            (case (HiMatch test clauses)
+                (begin
+                    (define labeledClauses (pass1LabeledClauses clauses))
+                    (define (Pair explicitCont contBlocks)
+                        (pass1ExplicitCont cont))
+                    (define clauseBlocks
+                        (pass1ClauseBlocks labeledClauses explicitCont))
+                    (define x3 (pass1TransformedClauses labeledClauses))
+                    (define x4 (FiMatch test x3))
+                    (define x5 (append contBlocks clauseBlocks))
+                    (Triple nil x4 x5))))))
+
+(define (pass1TransformedClauses labeledClauses)
+    (begin
+        (match labeledClauses
+            (case (Cons labeledClause moreLabeledClauses)
+                (begin
+                    (define (Pair label clause)
+                        labeledClause)
+                    (define x1
+                        (match clause
+                            (case (HiCase c caseArgs caseBlk)
+                                (begin (FiCase c label)))
+                            (case (HiElse elseBlk)
+                                (begin (FiElse label)))))
+                    (define x2 (pass1TransformedClauses moreLabeledClauses))
+                    (cons x1 x2)))
+            (else (begin nil)))))
+
+(define (pass1LabeledClauses clauses)
+    (begin
+        (match clauses
+            (case (Cons clause moreClauses)
+                (begin
+                    (define x1 (genLabel))
+                    (Pair x1 clause)))
+            (else (begin nil)))))
+
+(define (pass1TrivialExpr expr cont)
+    (begin
+        (define fiExpr
+            (match expr
+                (case (HiConsApp c consArgs)
+                    (begin (FiConsApp c consArgs)))
+                (case (HiPrimApp p primArgs)
+                    (begin (FiPrimApp p primArgs)))
+                (else
+                    (begin expr))))
+        (match cont
+            (case (P1TailCont)
+                (begin
+                    (define x (genTmp))
+                    (define x1 (FiStmt x fiExpr))
+                    (define x10 (cons x1 nil))
+                    (define x2 (FiReturn x))
+                    (Triple x10 x2 nil)))
+            (case (P1BlockCont label)
+                (begin
+                    (define y (genTmp))
+                    (define x3 (FiStmt y fiExpr))
+                    (define x4 (cons x3 nil))
+                    (define x5 (cons y nil))
+                    (define x6 (FiGoto label x5))
+                    (Triple x4 x6)))
+            (case (P1TrivialCont z forms formsCont)
+                (begin
+                    (define x7 (pass1Begin forms formsCont))
+                    (define (Triple stmts xfer blks) x7)
+                    (define x8 (FiStmt z fiExpr))
+                    (define x9 (cons x8 stmts))
+                    (Triple x9 xfer blks))))))
+
+(define (pass1ClauseBlocks labeledClauses cont)
+    (begin
+        (match labeledClauses
+            (case (Cons labeledClause moreLabeledClauses)
+                (begin
+                    (define x1 (pass1OneClauseBlocks labeledClause cont))
+                    (define x2 (pass1ClauseBlocks moreLabeledClauses cont))
+                    (append x1 x2)))
+            (else
+                (begin nil)))))
+
+(define (pass1OneClauseBlocks labeledClause cont)
+    (begin
+        (define (Pair label clause) labeledClause)
+        (define (Pair args blk)
+            (match clause
+                (case (HiCase c caseArgs caseBlk)
+                    (begin (Pair caseArgs caseBlk)))
+                (case (HiElse elseBlk)
+                    (begin (Pair nil elseBlk)))))
+        (define (HiBlock expr defines) blk)
+        (define (HiBegin forms) expr)
+        (define triple (pass1Begin forms cont))
+        (match triple
+            (case (Triple stmts xfer blks)
+                (begin
+                    (define x1 (FiBlock label args stmts xfer))
+                    (cons x1 blks))))))
+
+(define (pass1ExplicitCont cont)
+    (begin
+        (match cont
+            (case (P1TrivialCont x forms formsCont)
+                (begin
+                    (define label (genLabel))
+                    (define triple (pass1Begin forms formsCont))
+                    (match triple
+                        (case (Triple stmts xfer blks)
+                            (begin
+                                (define args (single x))
+                                (define blk
+                                    (FiBlock label args stmts xfer))
+                                (define contBlocks (cons blk blks))
+                                (define explicitCont (P1BlockCont label))
+                                (Pair explicitCont contBlocks))))))
+            (else
+                (begin (Pair cont nil))))))

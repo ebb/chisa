@@ -1,0 +1,334 @@
+#       The HI compiler written in HI
+#
+#   The compilation process is composed of a sequence of passes. Each pass
+#   has a contract in terms of constraints enforced on input programs and
+#   guarantees about output programs. These constraints and guarantees are
+#   encoded into names as follows: pass<N> accepts programs conforming to
+#   specification HI<M> for all M <= N and emits a programs which conform to
+#   HI<N-1>, except that pass1 emits FI code instead of HI0, which is not
+#   defined.
+#
+#   Note that passes are executed in descending order. Pass1 is executed last.
+#   Think of it this way: lower numbers correspond to simpler sublanguages.
+#
+#   * Pass1: HI1 -> FI, Make continuations explicit.
+
+# compile compiles a HI program down to an equivalent FI program.
+(define (compile hi)
+    (define hi1 hi)
+    (define fi  (pass1 hi1))
+    fi)
+
+#   Here we define some utilities that are not specific to any particular pass.
+
+(define (Pair a b))
+
+(define (Triple a b c))
+
+(define (single x)
+    (cons x nil))
+
+(define (map xs f)
+    (match xs
+        (case (Cons y ys)
+            (cons (f y) (map ys f)))
+        (else nil)))
+
+(define (fold xs a f)
+    (match xs
+        (case (Cons y ys)
+            (f y (fold ys a f)))
+        (else a)))
+
+(define (append xs ys)
+    (match xs
+        (case (Cons u us)
+            (cons u (append us ys)))
+        (else ys)))
+
+#   Pass1 converts HI1 programs into FI programs by making all continuations
+#   explicit.
+#
+#   HI1 programs match the following grammar:
+#
+#       <program>   =   <toplevelForm>+
+#
+#       <toplevelForm>  =   (define <variable> <constant>)
+#                       |   (define (<constructorName> <variable>*))
+#                       |   (define (<functionName> <variable>*)
+#                               <beginExpr>)
+#
+#       <constant>  = <number>
+#                   | <string>
+#
+#       <beginExpr> =   (begin
+#                           <stmt>*
+#                           <simpleExpr>)
+#
+#       <stmt>  =   (define <variable> <simpleExpr>)
+#               |   (define (<constructorName> <variable>*) <variable>)
+#
+#       <simpleExpr>    =   <trivialExpr>
+#                       |   (<functionName> <variable>*)
+#                       |   (match <variable>
+#                               <matchClause>+)
+#
+#       <trivialExpr>   =   <constant>
+#                       |   <variable>
+#                       |   (<constructorName> <variable>*)
+#                       |   (<primitiveName> <variable>*)
+#
+#       <matchClause>   =   <caseClause>
+#                       |   <elseClause>
+#
+#       <caseClause>    =   (case (<constructorName> <variable>*)
+#                               <beginExpr>)
+#
+#       <elseClause>    =   (else
+#                               <beginExpr>)
+#
+#       <functionName>  =   [The name of a function defined at toplevel]
+#
+#       <constructorName>   =   [The name of a constructor defined at toplevel]
+#
+#       <primitiveName> =   [The name of a primitive defined by the runtime]
+#
+#       <variable>  = [Any variable name that does not name a global function
+#                       or global constructor]
+#
+#   Additionally, the list of match clauses in a given match form of a HI1
+#   program must include at most one <elseClause>.
+#
+#   The main goal of Pass1 is to compute a list of FI basic blocks for each
+#   function. It accomplishes this goal by traversing the syntax tree and
+#   accumulating a list by appending the lists required for subprograms.
+#
+#   Here are a few of the central datastructures:
+#
+#       * (Triple stmts xfer blks)
+#
+#           Many of the functions return a triple of this form. stmts is a
+#           list of FI stmts that should be executed in sequence, followed
+#           by the FI control transfer xfer. blks is an unordered list of
+#           FI basic blocks that xfer will jump into. A triple of this form
+#           is almost the same as a list of basic blocks but there is one
+#           block that is considered incomplete: the one that will eventually
+#           contain stmts and xfer.
+#
+#       * (P1TailCont), (P1BlockCont label), (P1TrivialCont x forms formsCont)
+#
+#           Each of these represents a continuation. A single P1TailCont is
+#           constructed at the beginning of the recursion and passed down to
+#           the expressions in tail position to signify that their value should
+#           be returned from the function.  P1BlockCont continuations are
+#           created as necessary so that nontail calls have somewhere to return
+#           to and so that branches of a nontail pattern match have a common
+#           place to send their value for further use within the function.
+#           Finally, P1TrivialCont is used to delay the choice of whether or
+#           not a block will be needed for the given continuation. If we
+#           eventually find ourselves in a position where a block is needed but
+#           the continuation is of the P1TrivialCont form, then we construct a
+#           fresh block from the P1TrivialCont at that time. Otherwise, we
+#           compose statements together so that the continuation corresponding
+#           to that P1TrivialCont becomes implicit in the final FI program.  In
+#           that case, it represents the continuation to which a <trivialExpr>
+#           returns its value.
+#
+#   A few notes on terminology:
+#
+#       We call a continuation 'explicit' if it is either a P1TailCont or a
+#       P1BlockCont. The reason is that such continuations can be refered to in
+#       the FI program transfer statements.  A P1TrivialCont is 'implicit' and
+#       will need to be converted into an explicit P1BlockCont if a FI transfer
+#       instruction needs to target that continuation.
+#
+#       We use 'forms' to refer to the parts of a begin expression. A form is
+#       either a <stmt> or a <simpleExpr>.
+
+(define (P1TailCont))
+
+(define (P1BlockCont label))
+
+(define (P1TrivialCont x forms formsCont))
+
+# pass1 transforms a HI1 program into a FI program.
+(define (pass1 hi1)
+    (map hi1 pass1Toplevel))
+
+# pass1Toplevel transforms a single toplevel form.
+(define (pass1Toplevel def)
+    (match def
+        (case (HiDefineVar x c)
+            (FiDefineVar x c))
+        (case (HiDefineCons c args)
+            (FiDefineCons c args))
+        (case (HiDefineFunc f args blk)
+            (FiDefineFunc f args
+                (begin
+                    (define (HiBlock expr defines) blk)
+                    (define (HiBegin forms) expr)
+                    (define (Triple stmts xfer blks)
+                        (pass1Begin forms (P1TailCont)))
+                    (cons
+                        (FiBlock (genLabel) nil stmts xfer)
+                        blks))))))
+
+# pass1Begin transforms sequences of the form <stmt>* <simpleExpr> that have
+# been extracted from begin forms. It works on any such sequence; not just in
+# the case where forms is the complete list of forms for a begin form in the
+# input program.
+(define (pass1Begin forms cont)
+    (begin
+        (define (Cons form moreForms) forms)
+        (match form
+            (case (HiDefineByMatch c args blk)
+                (define (HiBlock expr defines) blk)
+                (pass1SimpleExpr
+                    (HiMatch expr
+                        (single
+                            (HiCase c args
+                                (HiBlock (HiBegin moreForms) nil))))
+                    cont))
+            (case (HiDefineVar x varBlk)
+                # form is a <stmt> and moreForms is a list of the form:
+                # <stmt>* <simpleExpr>.
+                (define (HiBlock expr defines) varBlk)
+                (pass1SimpleExpr expr
+                    (P1TrivialCont x moreForms cont)))
+            (else
+                # form is a <simpleExpr> and moreForms is nil.
+                (pass1SimpleExpr form cont)))))
+
+# pass1SimpleExpr transforms a <simpleExpr>.
+(define (pass1SimpleExpr expr cont)
+    # If expr is a <trivialExpr>, then we delegate the job to pass1TrivialExpr.
+    # Nontrivial simple expressions are calls or match expressions. We handle
+    # those here.
+    (match expr
+        (case (Fixnum)
+            (pass1TrivialExpr expr cont))
+        (case (String)
+            (pass1TrivialExpr expr cont))
+        (case (Id name)
+            (pass1TrivialExpr expr cont))
+        (case (HiConsApp c args)
+            (pass1TrivialExpr expr cont))
+        (case (HiPrimApp p args)
+            (pass1TrivialExpr expr cont))
+        (case (HiCall f args)
+            (define (Pair explicitCont contBlocks)
+                (pass1ExplicitCont cont))
+            (match explicitCont
+                (case (P1TailCont)
+                    (Triple nil (FiCall nil f args) nil))
+                (case (P1BlockCont label)
+                    (Triple nil (FiCall label f args) contBlocks))))
+        (case (HiMatch test clauses)
+            (begin
+                (define labeledClauses
+                    (map clauses
+                        (func (clause)
+                            (Pair (genLabel) clause))))
+                (define (Pair explicitCont contBlocks)
+                    (pass1ExplicitCont cont))
+                (define clauseBlocks
+                    (pass1ClauseBlocks labeledClauses explicitCont))
+                (Triple nil
+                    (FiMatch test
+                        (map labeledClauses
+                            (func (labeledClause)
+                                (begin
+                                    (define (Pair label clause)
+                                        labeledClause)
+                                    (match clause
+                                        (case (HiCase c args blk)
+                                            (FiCase c label))
+                                        (case (HiElse blk)
+                                            (FiElse label)))))))
+                    (append contBlocks clauseBlocks))))))
+
+# pass1TrivialExpr transforms a <trivialExpr>.
+(define (pass1TrivialExpr expr cont)
+    # Some interesting questions answered here: (1) Can we use an implicit
+    # continuation? (2) If not, what sort of transfer instruction shall we use?
+    (begin
+        (define fiExpr
+            (match expr
+                (case (HiConsApp c args)
+                    (FiConsApp c args))
+                (case (HiPrimApp p args)
+                    (FiPrimApp p args))
+                (else
+                    # expr is a <constant> or a <variable> and is represented
+                    # the same way in both HI and FI.
+                    expr)))
+        (match cont
+            (case (P1TailCont)
+                (begin
+                    (define x (genTmp))
+                    (Triple
+                        (single (FiStmt x fiExpr))
+                        (FiReturn x)
+                        nil)))
+            (case (P1BlockCont label)
+                (begin
+                    (define x (genTmp))
+                    (Triple
+                        (single (FiStmt x fiExpr))
+                        (FiGoto label (single x))
+                        nil)))
+            (case (P1TrivialCont x forms formsCont)
+                # We can use an implicit continuation here! We just cons our
+                # statement onto the recursively computed list.
+                (begin
+                    (define (Triple stmts xfer blks)
+                        (pass1Begin forms formsCont))
+                    (Triple (cons (FiStmt x fiExpr) stmts)
+                        xfer blks))))))
+
+# pass1ClauseBlocks builds up a list of FI basic blocks by transforming a list
+# of clauses each of whose target label has already been chosen. All the
+# clauses will return to a common continuation.
+(define (pass1ClauseBlocks labeledClauses cont)
+    (fold
+        (map labeledClauses
+            (func (labeledClause)
+                (begin
+                    (define (Pair label clause) labeledClause)
+                    (define (Pair args blk)
+                        (match clause
+                            (case (HiCase c caseArgs caseBlk)
+                                (Pair caseArgs caseBlk))
+                            (case (HiElse elseBlk)
+                                (Pair nil elseBlk))))
+                    (define (HiBlock expr defines) blk)
+                    (define (HiBegin forms) expr)
+                    (define (Triple stmts xfer blks)
+                        (pass1Begin forms cont))
+                    (cons
+                        (FiBlock label args stmts xfer)
+                        blks))))
+        nil
+        append))
+
+# pass1ExplicitCont returns a (Pair explicitCont contBlocks) where explicitCont
+# is an explicit continuation and contBlocks is a list of FI basic blocks.
+# If cont is already explicit, then it is returned as is together with an
+# empty list of FI basic blocks. Otherwise, we create a fresh block, which may
+# necessitate the creation of other blocks; these are returned together with
+# the new block as contBlocks.
+(define (pass1ExplicitCont cont)
+    (match cont
+        (case (P1TrivialCont x forms formsCont)
+            # We need to construct a fresh block for this continuation.
+            (begin
+                (define label (genLabel))
+                (define (Triple stmts xfer blks)
+                    (pass1Begin forms formsCont))
+                (Pair
+                    (P1BlockCont label)
+                    (cons (FiBlock label (single x) stmts xfer)
+                        blks))))
+        (else
+            # The continuation is already explicit.
+            (Pair cont nil))))
